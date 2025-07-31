@@ -1,17 +1,18 @@
-import tensorflow as tf
-import tensorflow_probability as tfp
+# import tensorflow as tf
+# import tensorflow_probability as tfp
+# tfd = tfp.distributions
 
 import numpy as np
 import matplotlib.pyplot as plt
 import time
 
 
-#from numpy import linalg as LA
+from numpy import linalg as LA
 from matplotlib.colors import Normalize
 from multiprocessing import Pool
 import scipy
 
-tfd = tfp.distributions
+
 
 
 class NNHyperparameters:
@@ -26,8 +27,7 @@ class NNHyperparameters:
 
 
 class SDEARFFTrain:
-    def __init__(self, n_dimensions=1, x_min=None, x_max=None, omega_drift=None, amp_drift=None, z_mean=0, z_std=1,
-                 omega_diffusion=None, amp_diffusion=None, diffusion_std=1, diffusion_type="diagonal", rng=None, resampling=True):
+    def __init__(self, n_dimensions=1, x_min=None, x_max=None, omega_drift=None, amp_drift=None, z_mean=0, z_std=1, omega_diffusion=None, amp_diffusion=None, diffusion_std=1, diffusion_type="diagonal", random_seed=None, resampling=True):
         self.d = n_dimensions
         self.tri = n_dimensions * (n_dimensions + 1) // 2
         self.x_min = x_min
@@ -40,12 +40,13 @@ class SDEARFFTrain:
         self.amp_diffusion = amp_diffusion
         self.diffusion_std = diffusion_std
         self.diffusion_type = diffusion_type
-        self.rng = rng
+        self.rng = np.random.default_rng(random_seed)
         self.resampling = resampling
         self.history = {'loss': None, 'val_loss': None, 'true_loss': None, 'training_time': None, 'drift_error': None, 'diffusion_error': None}
 
     @staticmethod
     def normalise_z(z):
+        z = np.array(z, dtype=np.float32)
         z_mean = np.mean(z, axis=0)
         z_std = np.std(z, axis=0)
         z_norm = (z - z_mean) / z_std
@@ -157,7 +158,7 @@ class SDEARFFTrain:
         St = SDEARFFTrain.S(x, omega)
         A = np.matmul(np.transpose(np.conj(St)), St) + x.shape[0] * lambda_reg * np.identity(K)
         b = np.matmul(np.transpose(np.conj(St)), y_np1)
-        #amp = LA.solve(A, b)
+        #amp2 = LA.solve(A, b)
         amp, _ = SDEARFFTrain.cgls(A, b, shift=0, tol=1e-10, maxit=1e3)  # iterative solver 
         return amp
 
@@ -283,7 +284,7 @@ class SDEARFFTrain:
         K = param.K
         omega = np.zeros((x.shape[1], K))
         amp = SDEARFFTrain.get_amp(x_norm, y_norm, param.lambda_reg, omega, K)
-
+        
         ve = np.zeros(param.M_max)
         ve_min = float('inf')
         moving_avg = np.zeros(param.M_max)
@@ -310,7 +311,7 @@ class SDEARFFTrain:
 
             # calculate validation loss
             ve[i] = np.mean(np.abs(SDEARFFTrain.beta(x_norm_valid, omega, amp) - y_norm_valid) ** 2)
-
+            
             # break loop when validation loss stagnates
             if i < moving_avg_len:
                 moving_avg[i] = np.mean(ve[:i+1])
@@ -328,8 +329,8 @@ class SDEARFFTrain:
             if ve[i] < ve_min:
                 end_time = time.time()
                 ve_min = ve[i]
-                setattr(self, f'omega_{param.name}', np.array(np.copy(omega)))
-                setattr(self, f'amp_{param.name}', np.array(np.copy(amp)))
+                setattr(self, f'omega_{param.name}', omega)
+                setattr(self, f'amp_{param.name}', amp)
 
             print(f"\r{param.name} epoch: {i}", end='')
         print()
@@ -337,10 +338,14 @@ class SDEARFFTrain:
         return ve[:i], moving_avg[:i], end_time-start_time
 
     def train_model(self, drift_param, diffusion_param, true_drift, true_diffusion, y_n, y_np1, x=None, step_sizes=None, validation_split=0.1, ARFF_validation_split=0.1, YinX=True, plot=False):
+        y_n = np.array(y_n, dtype=np.float32)
+        y_np1 = np.array(y_np1, dtype=np.float32)
+        step_sizes = np.array(step_sizes, dtype=np.float32)
         if x is None:
             x = y_n
         elif YinX:
             x = np.concatenate((y_n, x), axis=1)
+            x = y_n = np.array(x, dtype=np.float32)
 
         (y_n, y_np1, x, step_sizes), (y_n_valid, y_np1_valid, x_valid, step_sizes_valid) = SDEARFFTrain.split_data(self, validation_split, y_n, y_np1, x, step_sizes)
 
