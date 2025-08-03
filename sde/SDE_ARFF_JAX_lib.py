@@ -130,7 +130,7 @@ class SDEARFFTrain:
         if self.diffusion_type == "diagonal":
             diffusion_matrix = jnp.sqrt(covariance)
         elif self.diffusion_type == "triangular":
-            diffusion_matrix = jax.vmap(jnp.linalg.cholesky(covariance))
+            diffusion_matrix = jax.vmap(jnp.linalg.cholesky)(covariance)
         else:
             def matrix_sqrtm(mat):
                 vals, vecs = jnp.linalg.eigh(mat)
@@ -155,9 +155,9 @@ class SDEARFFTrain:
         if self.diffusion_type == "diagonal":
             diffusion_vectors = f ** 2 / step_sizes
         else:
-            f_reshape = f[:, :, None]
+            f_reshaped = f[:, :, None]
             f_square = jnp.matmul(f_reshaped, f_reshaped.transpose(0, 2, 1))
-            f_square_h = f_square / step_sizes[:, None, None]
+            f_square_h = f_square / step_sizes[:, None]
 
             LT_idx_i, LT_idx_j = jnp.tril_indices(self.d)
             diffusion_vectors = f_square_h[:, LT_idx_i, LT_idx_j]
@@ -167,31 +167,13 @@ class SDEARFFTrain:
     @staticmethod
     @jit
     def get_amp(x, y, lambda_reg, omega):
-        N = x.shape[0]
         S = SDEARFFTrain.S(x, omega) 
-        
-        # Ss = jnp.transpose(S)
-    
-        # def S_operator(p):
-        #     #(S^*S + N\lambdaI)p = S^*(Sp) + N\lambdap
-        #     return jnp.matmul(Ss, jnp.matmul(S, p)) + N * lambda_reg * p
 
-        # amp2 = jax.scipy.sparse.linalg.cg(S_operator, jnp.matmul(Ss, y), tol=1e-10, maxiter=1e6)[0]
-
-        # owen code
         A = jnp.matmul(jnp.conj(jnp.transpose(S)), S) + x.shape[0] * lambda_reg * jnp.eye(omega.shape[1])
         b = jnp.matmul(jnp.conj(jnp.transpose(S)), y)
         
         #amp = jnp.linalg.solve(A, b)
         amp, _ = jax.scipy.sparse.linalg.cg(A, b, tol=1e-6, maxiter=1e5)
-        
-        # eigvals = jnp.linalg.eigvalsh(A)
-        # jax.debug.print("min = {a}", a=jnp.min(eigvals))
-        # jax.debug.print("max = {a}", a=jnp.max(eigvals))
-        # jax.debug.print("amp = {a}", a=amp)
-        # jax.debug.print("amp2 = {a}", a=amp2)
-        # jax.debug.print("amp3 = {a}", a=amp3)
-        
         return amp
 
     @staticmethod
@@ -202,6 +184,8 @@ class SDEARFFTrain:
         maha = jnp.sum((diff ** 2) / var, axis=-1)
         d = x.shape[-1]
         log_prob = -0.5 * (d * jnp.log(2 * jnp.pi) + log_det + maha)
+        #jax.debug.print("diff: {0}, var: {1}, log_det: {2}, maha: {3}, log_prob: {4}", diff, var, log_det, maha, log_prob)
+
         return log_prob
 
     @staticmethod
@@ -215,6 +199,16 @@ class SDEARFFTrain:
         return log_prob
 
     @staticmethod
+    @jit
+    def batched_logpdf_diag(x, mean, scale_diag):
+        return jax.vmap(SDEARFFTrain.batch_logpdf_diag, in_axes=(0, 0, 0))(x, mean, scale_diag)
+
+    @staticmethod
+    @jit
+    def batched_logpdf_full(x, mean, chol):
+        return jax.vmap(SDEARFFTrain.batch_logpdf_full, in_axes=(0, 0, 0))(x, mean, chol)
+    
+    @staticmethod
     def chunked_apply(fn, y, loc, scale, chunk_size=4096):
         N = y.shape[0]
         results = []
@@ -227,35 +221,39 @@ class SDEARFFTrain:
     
     @staticmethod
     def get_loss(y_n, y_np1, x_n, step_sizes, drift, diffusion, diffusion_type="symmetric"):
-        print(drift(x_n[0,:]).shape)
-        print(diffusion(x_n[:0,:]).shape)
-        loc = y_n + step_sizes[:, None] * drift(x_n)
-        scale = jnp.sqrt(step_sizes)[:, None, None] * diffusion(x_n)
+        loc = y_n + step_sizes * drift(x_n)
+        scale = jnp.sqrt(step_sizes[:, 0])[:, None, None] * diffusion(x_n)
         
         if diffusion_type == "symmetric":
             scale = jnp.matmul(scale, jnp.transpose(scale, (0, 2, 1)))
             scale = jnp.linalg.cholesky(scale)
 
-        # if diffusion_type == "diagonal":
-        #     log_prob = SDEARFFTrain.chunked_apply(SDEARFFTrain.batched_logpdf_diag, y_np1, loc, scale)
-        # else:
-        #     log_prob = SDEARFFTrain.chunked_apply(SDEARFFTrain.batched_logpdf_full, y_np1, loc, scale)
+        if diffusion_type == "diagonal":
+            scale = jnp.diagonal(scale, axis1=1, axis2=2)
+            log_prob = SDEARFFTrain.chunked_apply(SDEARFFTrain.batched_logpdf_diag, y_np1, loc, scale)
+        else:
+            log_prob = SDEARFFTrain.chunked_apply(SDEARFFTrain.batched_logpdf_full, y_np1, loc, scale)
 
         return -jnp.mean(log_prob)
 
     @staticmethod
     def RMSE(trained_func, true_func, x):
-        rmse = np.sqrt(np.mean((trained_func(x).reshape(-1, 1, 1) - true_func(x).reshape(-1, 1, 1)) ** 2))
+        diff = trained_func(x).reshape(-1, 1, 1) - true_func(x).reshape(-1, 1, 1)
+        rmse = jnp.sqrt(jnp.mean(diff ** 2))
         return rmse
 
     @staticmethod
-    @partial(jit, static_argnames=['vnorm', 'RESAMPLING', 'METROPOLIS_TEST'])
-    def ARFF_one_step(key, omega, amp, x, y, delta, lambda_reg, gamma, vnorm, RESAMPLING=True, METROPOLIS_TEST=True):
-        amp_norm = vnorm(amp)
+    @jit
+    def vnorm(x):
+        return jax.vmap(jnp.linalg.norm, in_axes=(0,))(x)
+    
+    @staticmethod
+    @partial(jit, static_argnames=['RESAMPLING', 'METROPOLIS_TEST'])
+    def ARFF_one_step(key, omega, amp, x, y, delta, lambda_reg, gamma, RESAMPLING=True, METROPOLIS_TEST=True):
+        amp_norm = SDEARFFTrain.vnorm(amp)
         
         if RESAMPLING:
             amp_pmf = amp_norm / jnp.sum(amp_norm)
-            #jax.debug.print("amp_pmf = {a}", a=amp_pmf)
             key, subkey = random.split(key)
             omega = omega[:, random.choice(subkey, omega.shape[1], shape=(omega.shape[1],), p=amp_pmf)]
             
@@ -263,9 +261,8 @@ class SDEARFFTrain:
             key, subkey = random.split(key)
             dw = random.normal(subkey, omega.shape)
             omega_prime = omega + delta * dw
-            #jax.debug.print("omega_p = {a}", a=omega_prime)
     
-            amp_prime_norm = vnorm(SDEARFFTrain.get_amp(x, y, lambda_reg, omega_prime))
+            amp_prime_norm = SDEARFFTrain.vnorm(SDEARFFTrain.get_amp(x, y, lambda_reg, omega_prime))
     
             key, subkey = random.split(key)
             omega = jnp.where((amp_prime_norm / amp_norm) ** gamma >= random.uniform(subkey, omega.shape[1]), omega_prime, omega)
@@ -295,13 +292,10 @@ class SDEARFFTrain:
         min_index = 0
         break_iterations = 5
         
-        vnorm = jit(jax.vmap(jnp.linalg.norm, in_axes=(0,)))
-        
         for i in range(param.M_max):
             # ARFF one step
             omega, amp, key = SDEARFFTrain.ARFF_one_step(key, omega, amp, x_norm, y_norm, 
-                                                         param.delta, param.lambda_reg, param.gamma,
-                                                         vnorm=vnorm, 
+                                                         param.delta, param.lambda_reg, param.gamma, 
                                                          RESAMPLING=self.resampling,
                                                          METROPOLIS_TEST=self.metropolis_test)
 
@@ -380,13 +374,13 @@ class SDEARFFTrain:
                 SDEARFFTrain.plot_2D(self, true_diffusion, x, diffusion_vectors_norm, diffusion_param.name)
             SDEARFFTrain.plot_loss(ve_diffusion, moving_avg_diffusion)
 
-        # # calculate losses
-        # self.history['drift_RMSE'] = SDEARFFTrain.RMSE(self.drift, true_drift, x)
-        # self.history['diffusion_RMSE'] = SDEARFFTrain.RMSE(self.diffusion, true_diffusion, x)
-        # self.history['loss'] = SDEARFFTrain.get_loss(y_n, y_np1, x, step_sizes, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
-        # self.history['val_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
-        # self.history['true_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=true_drift, diffusion=true_diffusion, diffusion_type=self.diffusion_type)
-        # self.history['training_time'] = z_time + diffusion_vector_time + minima_time_drift + minima_time_diffusion
+        # calculate losses
+        self.history['drift_RMSE'] = SDEARFFTrain.RMSE(self.drift, true_drift, x)
+        self.history['diffusion_RMSE'] = SDEARFFTrain.RMSE(self.diffusion, true_diffusion, x)
+        self.history['loss'] = SDEARFFTrain.get_loss(y_n, y_np1, x, step_sizes, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
+        self.history['val_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
+        self.history['true_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=true_drift, diffusion=true_diffusion, diffusion_type=self.diffusion_type)
+        self.history['training_time'] = z_time + diffusion_vector_time + minima_time_drift + minima_time_diffusion
         
         print(f"\rDrift RMSE: {self.history['drift_RMSE']}")
         print(f"\rDiffusion RMSE: {self.history['diffusion_RMSE']}")

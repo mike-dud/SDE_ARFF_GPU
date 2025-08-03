@@ -387,9 +387,9 @@ class SDEARFFTrain:
         # calculate losses
         self.history['drift_RMSE'] = SDEARFFTrain.RMSE(self.drift, true_drift, x)
         self.history['diffusion_RMSE'] = SDEARFFTrain.RMSE(self.diffusion, true_diffusion, x)
-        self.history['loss'] = SDEARFFTrain.get_loss(y_n, y_np1, x, step_sizes, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
-        self.history['val_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
-        self.history['true_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=true_drift, diffusion=true_diffusion, diffusion_type=self.diffusion_type)
+        # self.history['loss'] = SDEARFFTrain.get_loss(y_n, y_np1, x, step_sizes, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
+        # self.history['val_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=self.drift, diffusion=self.diffusion, diffusion_type=self.diffusion_type)
+        # self.history['true_loss'] = SDEARFFTrain.get_loss(y_n_valid, y_np1_valid, x_valid, step_sizes_valid, drift=true_drift, diffusion=true_diffusion, diffusion_type=self.diffusion_type)
         self.history['training_time'] = z_time + diffusion_vector_time + minima_time_drift + minima_time_diffusion
         
         print(f"\rDrift RMSE: {self.history['drift_RMSE']}")
